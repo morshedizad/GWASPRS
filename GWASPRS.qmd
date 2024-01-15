@@ -1,0 +1,293 @@
+---
+title: "Genome-Wide Association Study (GWAS) and Polygenic Risk Score (PRS)"
+format: html
+server: shiny
+author: Zohreh Morshedizad  
+affiliation: "University of Florida"
+date: today
+theme: flatly
+title-block-banner: images/banner.jpg
+---
+
+::: {.panel-tabset}
+
+## Introduction
+
+Welcome to the Genome-Wide Association Study (GWAS) and Polygenic Risk Score (PRS) Shiny App!
+
+This interactive tool, developed by Zohreh Morshedizad from University of Florida, allows you to explore genetic data and perform analyses related to GWAS and PRS. Whether you're a researcher, student, or anyone interested in genetics, this app provides you with the capabilities to discover associations between traits and genetic variants and calculate Polygenic Risk Scores.
+
+**Getting Started:**
+- In the "Traits" section, you can download the available traits from the database. Click the "Download the traits" button to get started.
+- Use the search feature to find specific traits by entering keywords in the "Submit a Trait" field and clicking the "Search" button.
+- In the "Search an ID" section, enter an ID to search for associations related to that specific trait. Visualize the associations using Volcano and Manhattan plots.
+
+**Calculating Polygenic Risk Scores:**
+- The "Calculate PRS" section allows you to compute Polygenic Risk Scores based on selected genetic variants. Adjust the P-value threshold, enter genotype data, and click "Calculate PRS" to generate the scores.
+- The PRS are categorized into "Positive Effects" and "Negative Effects," displaying the associated variants for each category.
+- You can also view the selected variants' effects on your genotype data and see the calculated PRS and normalized PRS.
+
+
+Feel free to explore and utilize the functionalities of this app to gain insights into genetic associations and polygenic risk scores. If you have any questions or need assistance, don't hesitate to reach out for help.
+
+Start your genetic exploration now!
+
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+#| context: setup
+library(shiny)
+library(gwasrapidd)
+library(dplyr)
+library(tidyr)
+library(gt)
+library(shinycssloaders)
+library(shinybusy)
+library(shinyWidgets)
+library(magrittr)
+library(ggplot2)
+library(openai)
+library(gptchatteR)
+library(purrr)
+library(easyPubMed)
+```
+
+## Traits
+
+At the first step, We should get the traits from our database. It will take a while.
+
+```{r}
+br()
+```
+
+```{r}
+add_busy_bar(color = "#43c3a7", height = "8px")
+actionButton("getTraits", "Download the traits")
+#shinybusy::add_busy_spinner(spin = "fading-circle")
+tableOutput("gtable")
+
+
+```
+
+```{r}
+br()
+```
+
+```{r}
+#| context: server
+ my_traits <- eventReactive(input$getTraits, {
+
+   gwasrapidd::get_traits()
+   
+  })
+
+  
+  output$gtable <- renderTable({
+    gt::gt(my_traits()@traits)
+  })
+
+```
+
+## Search a Trait.
+
+```{r}
+textInput("searchaTrait", "Submit a Trait", "")
+
+br()
+
+actionButton("getsearchTraits", "Search")
+
+br()
+
+tableOutput("gtableTrait")
+
+br()
+
+```
+
+```{r}
+#| context: server
+the_trait <- eventReactive(input$getsearchTraits, {
+   dplyr::filter(my_traits()@traits, grepl(input$searchaTrait, trait, ignore.case = TRUE))
+  })
+  output$gtableTrait <- renderTable({
+    gt::gt(the_trait())
+  })
+
+```
+
+## Search an ID
+
+```{r}
+
+textInput("insertID", "Insert an ID", "")
+
+br()
+
+actionButton("getID", "Search")
+
+br()
+
+tableOutput("gIDdata")
+
+br()
+
+plotOutput("volcano")
+
+br()
+
+plotOutput("manhattan")
+```
+
+```{r}
+#| context: server
+my_association <- eventReactive(input$getID, {
+  gwasrapidd::get_associations(efo_id = input$insertID)
+  })
+tbl01 <- reactive(dplyr::select(my_association()@risk_alleles, association_id, variant_id, risk_allele)) 
+
+tbl02 <- reactive(dplyr::select(my_association()@associations, association_id, pvalue, beta_number, beta_unit, beta_direction))
+library(magrittr)
+my_variants <- reactive(dplyr::left_join(tbl01(), tbl02(), by = 'association_id') %>%
+  tidyr::drop_na() %>%
+  dplyr::arrange(variant_id, risk_allele))
+
+
+output$gIDdata <- renderTable({
+    gt::gt(my_variants())
+  })
+
+library(ggplot2)  
+
+output$volcano <- renderPlot({
+  ggplot2::ggplot(my_variants(), aes(x = beta_number, y = -log10(pvalue), color = beta_direction)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  labs(x = "Effect Size (Beta)", y = "-log10(p-value)", title = "Volcano Plot")
+})
+
+
+output$manhattan <- renderPlot({
+  ggplot2::ggplot(my_variants(), aes(x = variant_id, y = -log10(pvalue), color = beta_direction)) +
+  geom_point() +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  facet_wrap(~ risk_allele, scales = "free_x") +
+  labs(x = "Variant", y = "-log10(p-value)", title = "Manhattan Plot")
+  })
+```
+
+## Calculate PRS
+
+### PRS
+
+```{r}
+numericInput("pval", "P-Value Threshold",0.005, min=0, max=1)
+br()
+
+textInput("genotype_input", "Enter Genotype Data:")
+
+br()
+actionButton("calculate_prs", "Calculate PRS")
+
+h2("Positive Effects")
+tableOutput("prs_positive")
+
+h2("Negative Effects")
+
+tableOutput("prs_negative")
+
+
+h2("The Case")
+tableOutput("mygenspositive")
+
+tableOutput("mygensnegative")
+
+
+h2("Calculated PRS of the Case")
+tableOutput("myprs")
+tableOutput("min_prs")
+
+tableOutput("max_prs")
+
+tableOutput("normprs")
+
+
+
+```
+
+
+
+```{r}
+#| context: server
+
+library(purrr)  # Load purrr for functional programming
+
+prs_data <- eventReactive(input$calculate_prs, {
+  filter(my_variants(), pvalue < input$pval)
+})
+
+prs_data_positive <- reactive({
+  filter(prs_data(),beta_direction == "increase" )
+})
+
+prs_data_negative <- reactive({
+  filter(prs_data(),beta_direction == "decrease" )
+})
+
+output$prs_positive <- renderTable({
+    gt::gt(prs_data_positive())
+  })
+
+output$prs_negative <- renderTable({
+    gt::gt(prs_data_negative())
+  })  
+
+minprs <- reactive({
+min(0, -sum(prs_data_negative()$beta_number))
+}) 
+
+maxprs <- reactive({
+max(0, sum(prs_data_positive()$beta_number))
+}) 
+
+
+
+mygenpositive <- reactive({
+  filter(prs_data_positive(),  variant_id %in% c(strsplit(input$genotype_input, " ")[[1]]) )
+})
+
+mygennegative <- reactive({
+  filter(prs_data_negative(),  variant_id %in% c(strsplit(input$genotype_input, " ")[[1]]) )
+})
+
+
+
+
+output$mygenspositive <- renderTable({
+ gt::gt(mygenpositive())
+  }) 
+
+output$mygensnegative <- renderTable({
+ gt::gt(mygennegative())
+  }) 
+
+
+my_prs <- reactive({
+min(0, -sum(mygennegative()$beta_number)) + max(0, sum(mygenpositive()$beta_number))
+}) 
+
+
+ 
+output$myprs <- renderTable({
+c(paste("PRS = ",my_prs()),paste("Maximum = ",maxprs()),
+ paste("Minimum = ",minprs()),
+ paste("Normalized PRS: ",0,"<",(my_prs()-minprs())/(maxprs()-minprs()),"<",1 ))
+
+ 
+})
+  
+
+```
+
+
+:::
